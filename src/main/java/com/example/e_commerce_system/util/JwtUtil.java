@@ -1,4 +1,4 @@
-package com.example.e_commerce_system.util;   // Keep your package name
+package com.example.e_commerce_system.util;
 
 import io.jsonwebtoken.*;
 import io.jsonwebtoken.security.Keys;
@@ -7,7 +7,6 @@ import org.springframework.stereotype.Component;
 
 import java.security.Key;
 import java.util.Date;
-
 import javax.crypto.SecretKey;
 
 @Component
@@ -20,24 +19,27 @@ public class JwtUtil {
     private long expiration;
 
     private Key getSigningKey() {
+        if (secret == null || secret.length() < 32) {
+            throw new IllegalStateException("JWT secret must be at least 32 characters long.");
+        }
         return Keys.hmacShaKeyFor(secret.getBytes());
     }
 
     public String generateToken(String email, String role) {
         return Jwts.builder()
-                .setSubject(email)
+                .subject(email)
                 .claim("role", role)
-                .setIssuedAt(new Date())
-                .setExpiration(new Date(System.currentTimeMillis() + expiration))
+                .issuedAt(new Date())
+                .expiration(new Date(System.currentTimeMillis() + expiration))
                 .signWith(getSigningKey())
                 .compact();
     }
 
     public String extractUsername(String token) {
         return Jwts.parser()
-                .verifyWith((SecretKey) getSigningKey())           // Use verifyWith instead of setSigningKey
+                .verifyWith((SecretKey) getSigningKey())
                 .build()
-                .parseSignedClaims(token)              // Use parseSignedClaims
+                .parseSignedClaims(token)
                 .getPayload()
                 .getSubject();
     }
