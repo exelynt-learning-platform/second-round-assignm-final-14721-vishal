@@ -17,33 +17,40 @@ public class PaymentService {
 
     @PostConstruct
     public void init() {
-        if (stripeSecretKey == null || stripeSecretKey.trim().isEmpty() ||
-            stripeSecretKey.contains("your_stripe_test_key_here")) {
-            throw new IllegalStateException("Stripe secret key is not configured. " +
-                    "Please set STRIPE_SECRET_KEY environment variable with a valid key.");
+        if (stripeSecretKey == null || stripeSecretKey.trim().isEmpty()) {
+            throw new IllegalStateException("STRIPE_SECRET_KEY environment variable is missing. " +
+                    "Stripe payments will not work until configured.");
         }
+
+        if (stripeSecretKey.contains("your_stripe") || stripeSecretKey.startsWith("sk_test_your")) {
+            throw new IllegalStateException("Invalid Stripe key detected (placeholder value). " +
+                    "Please set a real STRIPE_SECRET_KEY from your Stripe dashboard.");
+        }
+
         Stripe.apiKey = stripeSecretKey.trim();
-        System.out.println("✅ Stripe initialized successfully.");
+        System.out.println("✅ Stripe initialized successfully with provided secret key.");
     }
 
     public String createPaymentIntent(BigDecimal amount) {
         try {
             long amountInCents = amount.multiply(BigDecimal.valueOf(100)).longValue();
             if (amountInCents < 50) {
-                throw new IllegalArgumentException("Minimum amount is $0.50");
+                throw new IllegalArgumentException("Minimum payment amount is $0.50");
             }
 
             PaymentIntentCreateParams params = PaymentIntentCreateParams.builder()
                     .setAmount(amountInCents)
                     .setCurrency("usd")
                     .setAutomaticPaymentMethods(
-                        PaymentIntentCreateParams.AutomaticPaymentMethods.builder().setEnabled(true).build())
+                            PaymentIntentCreateParams.AutomaticPaymentMethods.builder()
+                                    .setEnabled(true)
+                                    .build())
                     .build();
 
             PaymentIntent paymentIntent = PaymentIntent.create(params);
             return paymentIntent.getId();
         } catch (Exception e) {
-            throw new RuntimeException("Failed to create PaymentIntent: " + e.getMessage(), e);
+            throw new RuntimeException("Failed to create Stripe PaymentIntent: " + e.getMessage(), e);
         }
     }
 
@@ -51,9 +58,9 @@ public class PaymentService {
         try {
             PaymentIntent intent = PaymentIntent.retrieve(paymentIntentId);
             if ("succeeded".equals(intent.getStatus())) {
-                System.out.println("✅ Payment succeeded for: " + paymentIntentId);
+                System.out.println("✅ Payment succeeded for PaymentIntent: " + paymentIntentId);
             } else {
-                throw new RuntimeException("Payment not succeeded. Status: " + intent.getStatus());
+                throw new RuntimeException("Payment not succeeded. Current status: " + intent.getStatus());
             }
         } catch (Exception e) {
             throw new RuntimeException("Payment verification failed: " + e.getMessage(), e);

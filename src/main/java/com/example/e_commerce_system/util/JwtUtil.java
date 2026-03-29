@@ -5,9 +5,10 @@ import io.jsonwebtoken.security.Keys;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import javax.crypto.SecretKey;
+import java.nio.charset.StandardCharsets;
 import java.security.Key;
 import java.util.Date;
-import javax.crypto.SecretKey;
 
 @Component
 public class JwtUtil {
@@ -18,11 +19,20 @@ public class JwtUtil {
     @Value("${jwt.expiration}")
     private long expiration;
 
-    private Key getSigningKey() {
-        if (secret == null || secret.length() < 32) {
-            throw new IllegalStateException("JWT secret must be at least 32 characters long.");
+    private SecretKey getSigningKey() {
+        if (secret == null || secret.trim().isEmpty()) {
+            throw new IllegalStateException("JWT_SECRET environment variable is not set. " +
+                    "Please configure a strong secret (minimum 32 characters, preferably 64+ random chars).");
         }
-        return Keys.hmacShaKeyFor(secret.getBytes());
+
+        // Ensure minimum length for security (HS256 needs ~32 bytes, better to aim higher)
+        if (secret.length() < 32) {
+            throw new IllegalStateException("JWT secret is too weak. It must be at least 32 characters long. " +
+                    "Generate a strong random secret using: openssl rand -base64 64");
+        }
+
+        byte[] keyBytes = secret.getBytes(StandardCharsets.UTF_8);
+        return Keys.hmacShaKeyFor(keyBytes);
     }
 
     public String generateToken(String email, String role) {
@@ -37,7 +47,7 @@ public class JwtUtil {
 
     public String extractUsername(String token) {
         return Jwts.parser()
-                .verifyWith((SecretKey) getSigningKey())
+                .verifyWith(getSigningKey())
                 .build()
                 .parseSignedClaims(token)
                 .getPayload()
@@ -46,7 +56,7 @@ public class JwtUtil {
 
     public String extractRole(String token) {
         return Jwts.parser()
-                .verifyWith((SecretKey) getSigningKey())
+                .verifyWith(getSigningKey())
                 .build()
                 .parseSignedClaims(token)
                 .getPayload()
@@ -55,10 +65,7 @@ public class JwtUtil {
 
     public boolean validateToken(String token) {
         try {
-            Jwts.parser()
-                .verifyWith((SecretKey) getSigningKey())
-                .build()
-                .parseSignedClaims(token);
+            Jwts.parser().verifyWith(getSigningKey()).build().parseSignedClaims(token);
             return true;
         } catch (Exception e) {
             return false;
