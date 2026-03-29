@@ -21,9 +21,9 @@ public class OrderService {
     private final ProductRepository productRepository;
     private final PaymentService paymentService;
 
-    public OrderService(OrderRepository orderRepository, 
+    public OrderService(OrderRepository orderRepository,
                         UserRepository userRepository,
-                        CartRepository cartRepository, 
+                        CartRepository cartRepository,
                         ProductRepository productRepository,
                         PaymentService paymentService) {
         this.orderRepository = orderRepository;
@@ -60,9 +60,8 @@ public class OrderService {
         order.setTotalPrice(totalPrice);
         order.setPaymentMethod(paymentMethod);
 
-        // CRITICAL: Use pessimistic locking to prevent race condition / overselling
+        // Pessimistic locking to prevent race condition / overselling
         for (CartItem cartItem : cart.getItems()) {
-            // This acquires a database lock (SELECT ... FOR UPDATE)
             Product product = productRepository.findByIdWithLock(cartItem.getProduct().getId())
                     .orElseThrow(() -> new ResourceNotFoundException("Product not found: " + cartItem.getProduct().getId()));
 
@@ -71,7 +70,6 @@ public class OrderService {
                         + ". Available: " + product.getStockQuantity());
             }
 
-            // Create order item
             OrderItem orderItem = new OrderItem();
             orderItem.setOrder(order);
             orderItem.setProduct(product);
@@ -79,7 +77,6 @@ public class OrderService {
             orderItem.setPriceAtOrderTime(product.getPrice());
             order.getOrderItems().add(orderItem);
 
-            // Deduct stock safely (inside locked transaction)
             product.setStockQuantity(product.getStockQuantity() - cartItem.getQuantity());
             productRepository.save(product);
         }
@@ -92,11 +89,30 @@ public class OrderService {
             orderRepository.save(savedOrder);
         }
 
-        // Clear cart after successful order
+        // Clear cart
         cart.getItems().clear();
         cartRepository.save(cart);
 
         return convertToOrderResponse(savedOrder);
+    }
+
+    public List<OrderResponse> getMyOrders(String email) {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found"));
+        return orderRepository.findByUser(user).stream()
+                .map(this::convertToOrderResponse)
+                .collect(Collectors.toList());
+    }
+
+    public OrderResponse getOrderById(Long orderId, String email) {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found"));
+        Order order = orderRepository.findById(orderId)
+                .orElseThrow(() -> new ResourceNotFoundException("Order not found"));
+        if (!order.getUser().getId().equals(user.getId())) {
+            throw new UnauthorizedException("Unauthorized access to order");
+        }
+        return convertToOrderResponse(order);
     }
 
     private OrderResponse convertToOrderResponse(Order order) {
