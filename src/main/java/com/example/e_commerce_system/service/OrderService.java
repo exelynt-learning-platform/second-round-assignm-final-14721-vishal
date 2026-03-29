@@ -8,6 +8,7 @@ import com.example.e_commerce_system.exception.ResourceNotFoundException;
 import com.example.e_commerce_system.exception.UnauthorizedException;
 import com.example.e_commerce_system.repository.CartRepository;
 import com.example.e_commerce_system.repository.OrderRepository;
+import com.example.e_commerce_system.repository.ProductRepository;
 import com.example.e_commerce_system.repository.UserRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,13 +23,16 @@ public class OrderService {
     private final OrderRepository orderRepository;
     private final UserRepository userRepository;
     private final CartRepository cartRepository;
+    private final ProductRepository productRepository;   // Added for stock deduction
     private final PaymentService paymentService;
 
     public OrderService(OrderRepository orderRepository, UserRepository userRepository,
-                        CartRepository cartRepository, PaymentService paymentService) {
+                        CartRepository cartRepository, ProductRepository productRepository,
+                        PaymentService paymentService) {
         this.orderRepository = orderRepository;
         this.userRepository = userRepository;
         this.cartRepository = cartRepository;
+        this.productRepository = productRepository;
         this.paymentService = paymentService;
     }
 
@@ -48,22 +52,20 @@ public class OrderService {
                 .map(item -> item.getProduct().getPrice().multiply(BigDecimal.valueOf(item.getQuantity())))
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
+        // FIXED: Safe PaymentMethod handling (resolves Critical Bug)
+        PaymentMethod method = (request.getPaymentMethod() != null) 
+                ? request.getPaymentMethod() 
+                : PaymentMethod.COD;
+
         // Create Order
         Order order = new Order();
         order.setUser(user);
         order.setShippingAddress(request.getShippingAddress());
         order.setStatus(OrderStatus.PENDING);
         order.setTotalPrice(totalPrice);
-     //   order.setPaymentMethod(request.getPaymentMethod());   // NEW
+        order.setPaymentMethod(method);
 
-     // Replace this line:
-     // order.setPaymentMethod(request.getPaymentMethod());
-
-     // With this safe code:
-     PaymentMethod method = (request.getPaymentMethod() != null) ? request.getPaymentMethod() : PaymentMethod.COD;
-     order.setPaymentMethod(method);
-        
-        // Add Order Items
+        // Add Order Items + Deduct Stock
         for (CartItem cartItem : cart.getItems()) {
             OrderItem orderItem = new OrderItem();
             orderItem.setOrder(order);
@@ -71,36 +73,37 @@ public class OrderService {
             orderItem.setQuantity(cartItem.getQuantity());
             orderItem.setPriceAtOrderTime(cartItem.getProduct().getPrice());
             order.getOrderItems().add(orderItem);
+
+            // Deduct stock
+            Product product = cartItem.getProduct();
+            product.setStockQuantity(product.getStockQuantity() - cartItem.getQuantity());
+            productRepository.save(product);
         }
 
         Order savedOrder = orderRepository.save(order);
 
-        // Handle Payment based on method
-        if (request.getPaymentMethod() == PaymentMethod.STRIPE) {
+        // Handle Payment
+        if (method == PaymentMethod.STRIPE) {
             try {
                 String paymentIntentId = paymentService.createPaymentIntent(totalPrice);
                 savedOrder.setPaymentIntentId(paymentIntentId);
                 orderRepository.save(savedOrder);
-                System.out.println("Stripe PaymentIntent created: " + paymentIntentId);
             } catch (Exception e) {
-                System.err.println("Stripe failed, order saved as PENDING: " + e.getMessage());
+                throw new RuntimeException("Payment initialization failed: " + e.getMessage());
             }
-        } else if (request.getPaymentMethod() == PaymentMethod.COD) {
-            // For COD, we can mark it as CONFIRMED or keep PENDING
-            savedOrder.setStatus(OrderStatus.PENDING); // or PAID if you want
+        } else {
+            savedOrder.setStatus(OrderStatus.PENDING); // COD
             orderRepository.save(savedOrder);
-            System.out.println("COD Order created successfully");
         }
 
-        // Clear cart
+        // Clear cart only after successful order creation
         cart.getItems().clear();
         cartRepository.save(cart);
 
         return convertToOrderResponse(savedOrder);
     }
-    
-    
- // ✅ This method was missing - Now Added
+
+    // getMyOrders - Already implemented, kept with minor improvement
     public List<OrderResponse> getMyOrders(String email) {
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
@@ -109,7 +112,7 @@ public class OrderService {
                 .map(this::convertToOrderResponse)
                 .collect(Collectors.toList());
     }
-    
+
     public OrderResponse getOrderById(Long orderId, String email) {
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
@@ -120,7 +123,6 @@ public class OrderService {
         if (!order.getUser().getId().equals(user.getId())) {
             throw new UnauthorizedException("You can only view your own orders");
         }
-
         return convertToOrderResponse(order);
     }
 
@@ -142,11 +144,8 @@ public class OrderService {
         response.setShippingAddress(order.getShippingAddress());
         response.setStatus(order.getStatus());
         response.setPaymentIntentId(order.getPaymentIntentId());
-        response.setItems(items);
-        
-        // ADD THIS LINE
         response.setPaymentMethod(order.getPaymentMethod());
-
+        response.setItems(items);
         return response;
     }
 }
