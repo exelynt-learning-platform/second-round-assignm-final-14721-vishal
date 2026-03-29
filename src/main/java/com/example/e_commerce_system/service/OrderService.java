@@ -45,11 +45,8 @@ public class OrderService {
             throw new IllegalStateException("Cart is empty");
         }
 
-        // FIXED: Strict null handling for PaymentMethod
-        PaymentMethod paymentMethod = request.getPaymentMethod();
-        if (paymentMethod == null) {
-            paymentMethod = PaymentMethod.COD;   // or throw new IllegalArgumentException("Payment method is required");
-        }
+        PaymentMethod paymentMethod = request.getPaymentMethod() != null ? 
+                request.getPaymentMethod() : PaymentMethod.COD;
 
         BigDecimal totalPrice = cart.getItems().stream()
                 .map(item -> item.getProduct().getPrice().multiply(BigDecimal.valueOf(item.getQuantity())))
@@ -62,13 +59,15 @@ public class OrderService {
         order.setTotalPrice(totalPrice);
         order.setPaymentMethod(paymentMethod);
 
-        // Copy items + deduct stock (with basic locking)
+        // Safe stock deduction with pessimistic locking
         for (CartItem cartItem : cart.getItems()) {
-            Product product = cartItem.getProduct();
+            // Lock the product row
+            Product product = productRepository.findByIdWithLock(cartItem.getProduct().getId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Product not found: " + cartItem.getProduct().getId()));
 
-            // Re-validate stock inside transaction
             if (product.getStockQuantity() < cartItem.getQuantity()) {
-                throw new IllegalStateException("Insufficient stock for product: " + product.getName());
+                throw new IllegalStateException("Insufficient stock for product: " + product.getName() 
+                        + ". Available: " + product.getStockQuantity());
             }
 
             OrderItem orderItem = new OrderItem();
@@ -80,22 +79,18 @@ public class OrderService {
 
             // Deduct stock
             product.setStockQuantity(product.getStockQuantity() - cartItem.getQuantity());
-            productRepository.save(product);
+            productRepository.save(product);  // Save inside transaction with lock
         }
 
         Order savedOrder = orderRepository.save(order);
 
-        // Handle payment
         if (paymentMethod == PaymentMethod.STRIPE) {
             String paymentIntentId = paymentService.createPaymentIntent(totalPrice);
             savedOrder.setPaymentIntentId(paymentIntentId);
             orderRepository.save(savedOrder);
-        } else {
-            savedOrder.setStatus(OrderStatus.PENDING); // COD
-            orderRepository.save(savedOrder);
         }
 
-        // Clear cart only on success
+        // Clear cart
         cart.getItems().clear();
         cartRepository.save(cart);
 

@@ -2,6 +2,8 @@ package com.example.e_commerce_system.util;
 
 import io.jsonwebtoken.*;
 import io.jsonwebtoken.security.Keys;
+import jakarta.annotation.PostConstruct;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -12,27 +14,25 @@ import java.util.Date;
 
 @Component
 public class JwtUtil {
-
-    @Value("${jwt.secret}")
+	@Value("${jwt.secret}")
     private String secret;
 
     @Value("${jwt.expiration}")
     private long expiration;
 
-    private SecretKey getSigningKey() {
+    @PostConstruct
+    public void validateSecret() {
         if (secret == null || secret.trim().isEmpty()) {
             throw new IllegalStateException("JWT_SECRET environment variable is not set. " +
-                    "Please configure a strong secret (minimum 32 characters, preferably 64+ random chars).");
+                    "Please provide a strong secret (at least 64 random characters recommended).");
         }
-
-        // Ensure minimum length for security (HS256 needs ~32 bytes, better to aim higher)
         if (secret.length() < 32) {
-            throw new IllegalStateException("JWT secret is too weak. It must be at least 32 characters long. " +
-                    "Generate a strong random secret using: openssl rand -base64 64");
+            throw new IllegalStateException("JWT secret is too weak. Minimum 32 characters required.");
         }
+    }
 
-        byte[] keyBytes = secret.getBytes(StandardCharsets.UTF_8);
-        return Keys.hmacShaKeyFor(keyBytes);
+    private SecretKey getSigningKey() {
+        return Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
     }
 
     public String generateToken(String email, String role) {
