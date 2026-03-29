@@ -45,11 +45,9 @@ public class OrderService {
             throw new IllegalStateException("Cart is empty");
         }
 
-        // FIXED: Strict null handling for PaymentMethod
-        PaymentMethod paymentMethod = request.getPaymentMethod();
-        if (paymentMethod == null) {
-            paymentMethod = PaymentMethod.COD;   // or throw new IllegalArgumentException("Payment method is required");
-        }
+        PaymentMethod paymentMethod = request.getPaymentMethod() != null 
+                ? request.getPaymentMethod() 
+                : PaymentMethod.COD;
 
         BigDecimal totalPrice = cart.getItems().stream()
                 .map(item -> item.getProduct().getPrice().multiply(BigDecimal.valueOf(item.getQuantity())))
@@ -62,15 +60,18 @@ public class OrderService {
         order.setTotalPrice(totalPrice);
         order.setPaymentMethod(paymentMethod);
 
-        // Copy items + deduct stock (with basic locking)
+        // CRITICAL: Use pessimistic locking to prevent race condition / overselling
         for (CartItem cartItem : cart.getItems()) {
-            Product product = cartItem.getProduct();
+            // This acquires a database lock (SELECT ... FOR UPDATE)
+            Product product = productRepository.findByIdWithLock(cartItem.getProduct().getId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Product not found: " + cartItem.getProduct().getId()));
 
-            // Re-validate stock inside transaction
             if (product.getStockQuantity() < cartItem.getQuantity()) {
-                throw new IllegalStateException("Insufficient stock for product: " + product.getName());
+                throw new IllegalStateException("Insufficient stock for product: " + product.getName() 
+                        + ". Available: " + product.getStockQuantity());
             }
 
+            // Create order item
             OrderItem orderItem = new OrderItem();
             orderItem.setOrder(order);
             orderItem.setProduct(product);
@@ -78,47 +79,24 @@ public class OrderService {
             orderItem.setPriceAtOrderTime(product.getPrice());
             order.getOrderItems().add(orderItem);
 
-            // Deduct stock
+            // Deduct stock safely (inside locked transaction)
             product.setStockQuantity(product.getStockQuantity() - cartItem.getQuantity());
             productRepository.save(product);
         }
 
         Order savedOrder = orderRepository.save(order);
 
-        // Handle payment
         if (paymentMethod == PaymentMethod.STRIPE) {
             String paymentIntentId = paymentService.createPaymentIntent(totalPrice);
             savedOrder.setPaymentIntentId(paymentIntentId);
             orderRepository.save(savedOrder);
-        } else {
-            savedOrder.setStatus(OrderStatus.PENDING); // COD
-            orderRepository.save(savedOrder);
         }
 
-        // Clear cart only on success
+        // Clear cart after successful order
         cart.getItems().clear();
         cartRepository.save(cart);
 
         return convertToOrderResponse(savedOrder);
-    }
-
-    public List<OrderResponse> getMyOrders(String email) {
-        User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new ResourceNotFoundException("User not found"));
-        return orderRepository.findByUser(user).stream()
-                .map(this::convertToOrderResponse)
-                .collect(Collectors.toList());
-    }
-
-    public OrderResponse getOrderById(Long orderId, String email) {
-        User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new ResourceNotFoundException("User not found"));
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() -> new ResourceNotFoundException("Order not found"));
-        if (!order.getUser().getId().equals(user.getId())) {
-            throw new UnauthorizedException("Unauthorized access to order");
-        }
-        return convertToOrderResponse(order);
     }
 
     private OrderResponse convertToOrderResponse(Order order) {
