@@ -1,15 +1,10 @@
 package com.example.e_commerce_system.service;
 
-import com.example.e_commerce_system.dto.OrderItemResponse;
-import com.example.e_commerce_system.dto.OrderRequest;
-import com.example.e_commerce_system.dto.OrderResponse;
+import com.example.e_commerce_system.dto.*;
 import com.example.e_commerce_system.entity.*;
 import com.example.e_commerce_system.exception.ResourceNotFoundException;
 import com.example.e_commerce_system.exception.UnauthorizedException;
-import com.example.e_commerce_system.repository.CartRepository;
-import com.example.e_commerce_system.repository.OrderRepository;
-import com.example.e_commerce_system.repository.ProductRepository;
-import com.example.e_commerce_system.repository.UserRepository;
+import com.example.e_commerce_system.repository.*;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -23,11 +18,13 @@ public class OrderService {
     private final OrderRepository orderRepository;
     private final UserRepository userRepository;
     private final CartRepository cartRepository;
-    private final ProductRepository productRepository;   // Added for stock deduction
+    private final ProductRepository productRepository;
     private final PaymentService paymentService;
 
-    public OrderService(OrderRepository orderRepository, UserRepository userRepository,
-                        CartRepository cartRepository, ProductRepository productRepository,
+    public OrderService(OrderRepository orderRepository, 
+                        UserRepository userRepository,
+                        CartRepository cartRepository, 
+                        ProductRepository productRepository,
                         PaymentService paymentService) {
         this.orderRepository = orderRepository;
         this.userRepository = userRepository;
@@ -45,69 +42,69 @@ public class OrderService {
                 .orElseThrow(() -> new ResourceNotFoundException("Cart not found"));
 
         if (cart.getItems().isEmpty()) {
-            throw new RuntimeException("Cart is empty. Please add items before checkout.");
+            throw new IllegalStateException("Cart is empty");
+        }
+
+        // FIXED: Strict null handling for PaymentMethod
+        PaymentMethod paymentMethod = request.getPaymentMethod();
+        if (paymentMethod == null) {
+            paymentMethod = PaymentMethod.COD;   // or throw new IllegalArgumentException("Payment method is required");
         }
 
         BigDecimal totalPrice = cart.getItems().stream()
                 .map(item -> item.getProduct().getPrice().multiply(BigDecimal.valueOf(item.getQuantity())))
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        // FIXED: Safe PaymentMethod handling (resolves Critical Bug)
-        PaymentMethod method = (request.getPaymentMethod() != null) 
-                ? request.getPaymentMethod() 
-                : PaymentMethod.COD;
-
-        // Create Order
         Order order = new Order();
         order.setUser(user);
         order.setShippingAddress(request.getShippingAddress());
         order.setStatus(OrderStatus.PENDING);
         order.setTotalPrice(totalPrice);
-        order.setPaymentMethod(method);
+        order.setPaymentMethod(paymentMethod);
 
-        // Add Order Items + Deduct Stock
+        // Copy items + deduct stock (with basic locking)
         for (CartItem cartItem : cart.getItems()) {
+            Product product = cartItem.getProduct();
+
+            // Re-validate stock inside transaction
+            if (product.getStockQuantity() < cartItem.getQuantity()) {
+                throw new IllegalStateException("Insufficient stock for product: " + product.getName());
+            }
+
             OrderItem orderItem = new OrderItem();
             orderItem.setOrder(order);
-            orderItem.setProduct(cartItem.getProduct());
+            orderItem.setProduct(product);
             orderItem.setQuantity(cartItem.getQuantity());
-            orderItem.setPriceAtOrderTime(cartItem.getProduct().getPrice());
+            orderItem.setPriceAtOrderTime(product.getPrice());
             order.getOrderItems().add(orderItem);
 
             // Deduct stock
-            Product product = cartItem.getProduct();
             product.setStockQuantity(product.getStockQuantity() - cartItem.getQuantity());
             productRepository.save(product);
         }
 
         Order savedOrder = orderRepository.save(order);
 
-        // Handle Payment
-        if (method == PaymentMethod.STRIPE) {
-            try {
-                String paymentIntentId = paymentService.createPaymentIntent(totalPrice);
-                savedOrder.setPaymentIntentId(paymentIntentId);
-                orderRepository.save(savedOrder);
-            } catch (Exception e) {
-                throw new RuntimeException("Payment initialization failed: " + e.getMessage());
-            }
+        // Handle payment
+        if (paymentMethod == PaymentMethod.STRIPE) {
+            String paymentIntentId = paymentService.createPaymentIntent(totalPrice);
+            savedOrder.setPaymentIntentId(paymentIntentId);
+            orderRepository.save(savedOrder);
         } else {
             savedOrder.setStatus(OrderStatus.PENDING); // COD
             orderRepository.save(savedOrder);
         }
 
-        // Clear cart only after successful order creation
+        // Clear cart only on success
         cart.getItems().clear();
         cartRepository.save(cart);
 
         return convertToOrderResponse(savedOrder);
     }
 
-    // getMyOrders - Already implemented, kept with minor improvement
     public List<OrderResponse> getMyOrders(String email) {
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
-
         return orderRepository.findByUser(user).stream()
                 .map(this::convertToOrderResponse)
                 .collect(Collectors.toList());
@@ -116,12 +113,10 @@ public class OrderService {
     public OrderResponse getOrderById(Long orderId, String email) {
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
-
         Order order = orderRepository.findById(orderId)
                 .orElseThrow(() -> new ResourceNotFoundException("Order not found"));
-
         if (!order.getUser().getId().equals(user.getId())) {
-            throw new UnauthorizedException("You can only view your own orders");
+            throw new UnauthorizedException("Unauthorized access to order");
         }
         return convertToOrderResponse(order);
     }
@@ -129,12 +124,12 @@ public class OrderService {
     private OrderResponse convertToOrderResponse(Order order) {
         List<OrderItemResponse> items = order.getOrderItems().stream()
                 .map(item -> {
-                    OrderItemResponse response = new OrderItemResponse();
-                    response.setProductId(item.getProduct().getId());
-                    response.setProductName(item.getProduct().getName());
-                    response.setQuantity(item.getQuantity());
-                    response.setPrice(item.getPriceAtOrderTime());
-                    return response;
+                    OrderItemResponse resp = new OrderItemResponse();
+                    resp.setProductId(item.getProduct().getId());
+                    resp.setProductName(item.getProduct().getName());
+                    resp.setQuantity(item.getQuantity());
+                    resp.setPrice(item.getPriceAtOrderTime());
+                    return resp;
                 })
                 .collect(Collectors.toList());
 
